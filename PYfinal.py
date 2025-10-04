@@ -7,7 +7,7 @@ Este sistema permite:
 1. Obtener datos de satélites desde Celestrak usando Skyfield
 2. Buscar satélites por nombre
 3. Calcular órbitas y posiciones futuras
-4. Predecir posibles colisiones en los próximos 6 meses
+4. Predecir posibles colisiones en los próximos 4 días
 5. Visualizar trayectorias orbitales
 
 Autor: NASA Space App Team
@@ -506,32 +506,53 @@ class SatelliteAnalyzer:
         Returns:
             List[Dict]: Posiciones futuras del satélite
         """
-        if satellite_name not in self.satellites:
+        try:
+            if satellite_name not in self.satellites:
+                print(f"❌ Satélite '{satellite_name}' no encontrado en la base de datos")
+                # Buscar coincidencias parciales
+                matches = [name for name in self.satellites.keys() if satellite_name.lower() in name.lower()]
+                if matches:
+                    print(f"💡 ¿Te refieres a alguno de estos?")
+                    for i, match in enumerate(matches[:5], 1):
+                        print(f"   {i}. {match}")
+                return []
+                
+            satellite = self.satellites[satellite_name]['satellite']
+            print(f"✅ Calculando posiciones para: {satellite_name}")
+            
+            # Crear timestamps para los próximos días
+            start_time = self.ts.now()
+            positions = []
+            
+            # Calcular posiciones cada 12 horas
+            total_points = days_ahead * 2  # Cada 12 horas = 2 puntos por día
+            print(f"📊 Calculando {total_points} posiciones para {days_ahead} días...")
+            
+            for hours in range(0, days_ahead * 24, 12):
+                try:
+                    t = self.ts.tt_jd(start_time.tt + hours / 24)
+                    geocentric = satellite.at(t)
+                    subpoint = geocentric.subpoint()
+                    
+                    positions.append({
+                        'datetime': t.utc_datetime(),
+                        'latitude': subpoint.latitude.degrees,
+                        'longitude': subpoint.longitude.degrees,
+                        'altitude_km': subpoint.elevation.km,
+                        'x_km': geocentric.position.km[0],
+                        'y_km': geocentric.position.km[1],
+                        'z_km': geocentric.position.km[2]
+                    })
+                except Exception as calc_error:
+                    print(f"⚠️  Error calculando posición para hora {hours}: {calc_error}")
+                    continue
+                    
+            print(f"✅ Calculadas {len(positions)} posiciones exitosamente")
+            return positions
+            
+        except Exception as e:
+            print(f"❌ Error en calculate_future_positions: {str(e)}")
             return []
-            
-        satellite = self.satellites[satellite_name]['satellite']
-        
-        # Crear timestamps para los próximos días
-        start_time = self.ts.now()
-        positions = []
-        
-        # Calcular posiciones cada 12 horas
-        for hours in range(0, days_ahead * 24, 12):
-            t = self.ts.tt_jd(start_time.tt + hours / 24)
-            geocentric = satellite.at(t)
-            subpoint = geocentric.subpoint()
-            
-            positions.append({
-                'datetime': t.utc_datetime(),
-                'latitude': subpoint.latitude.degrees,
-                'longitude': subpoint.longitude.degrees,
-                'altitude_km': subpoint.elevation.km,
-                'x_km': geocentric.position.km[0],
-                'y_km': geocentric.position.km[1],
-                'z_km': geocentric.position.km[2]
-            })
-            
-        return positions
     
     def analyze_collision_risk(self, satellite1_name: str, satellite2_name: str = None, 
                              threshold_km: float = 10.0, days_ahead: int = 180) -> Dict:
@@ -610,6 +631,213 @@ class SatelliteAnalyzer:
             'total_encounters': len(close_encounters),
             'satellites_analyzed': len(satellites_to_check)
         }
+    
+    def calculate_maneuver_time(self, v_rel: float, R_req: float = 1000.0, 
+                              sigma_0: float = 100.0, k: float = 0.001, n: float = 3.0) -> Dict:
+        """
+        Calcular el tiempo necesario para iniciar maniobras de evasión de colisión
+        
+        Basado en la ecuación: t ≥ (R_req + n·σ₀) / (v_rel − n·k)
+        
+        Args:
+            v_rel: Velocidad relativa entre objetos (m/s)
+                  En LEO: ~100 m/s hasta ~14,000 m/s (encuentros frontales)
+            R_req: Distancia de seguridad deseada (m). Ej: 100-1000 m
+            sigma_0: Incertidumbre posicional actual (1-sigma, m)
+            k: Tasa de crecimiento de incertidumbre (m/s)
+            n: Factor de confianza (ej: 3 para 3σ)
+            
+        Returns:
+            Dict: Análisis del tiempo de maniobra
+        """
+        try:
+            # Validar parámetros de entrada
+            if v_rel <= 0:
+                return {'error': 'La velocidad relativa debe ser positiva'}
+            
+            if R_req <= 0:
+                return {'error': 'La distancia de seguridad debe ser positiva'}
+            
+            if sigma_0 < 0:
+                return {'error': 'La incertidumbre posicional no puede ser negativa'}
+            
+            # Calcular componentes de la ecuación
+            numerador = R_req + n * sigma_0
+            denominador = v_rel - n * k
+            
+            # Verificar que el denominador sea positivo
+            if denominador <= 0:
+                return {
+                    'error': 'Configuración inválida',
+                    'reason': 'La velocidad relativa es insuficiente comparada con el crecimiento de incertidumbre',
+                    'recommendation': 'Reducir el factor de confianza (n) o mejorar la precisión orbital (reducir k)',
+                    'v_rel': v_rel,
+                    'n_k': n * k,
+                    'deficit': abs(denominador)
+                }
+            
+            # Calcular tiempo de maniobra
+            t_maneuver_seconds = numerador / denominador
+            
+            # Convertir a diferentes unidades
+            t_minutes = t_maneuver_seconds / 60
+            t_hours = t_minutes / 60
+            t_days = t_hours / 24
+            
+            # Determinar criticidad basada en el tiempo disponible
+            if t_hours < 1:
+                criticidad = "🔴 CRÍTICO"
+                recomendacion = "Maniobra inmediata requerida"
+            elif t_hours < 6:
+                criticidad = "🟠 ALTO"
+                recomendacion = "Preparar maniobra en las próximas horas"
+            elif t_hours < 24:
+                criticidad = "🟡 MEDIO"
+                recomendacion = "Planificar maniobra para hoy"
+            elif t_days < 7:
+                criticidad = "🟢 BAJO"
+                recomendacion = "Maniobra puede planificarse con anticipación"
+            else:
+                criticidad = "🔵 MÍNIMO"
+                recomendacion = "Tiempo suficiente para análisis detallado"
+            
+            # Calcular escenarios alternativos
+            escenarios = []
+            
+            # Escenario conservador (n=2)
+            if n != 2:
+                t_conservador = (R_req + 2 * sigma_0) / (v_rel - 2 * k) if (v_rel - 2 * k) > 0 else None
+                if t_conservador:
+                    escenarios.append({
+                        'nombre': 'Conservador (2σ)',
+                        'tiempo_segundos': t_conservador,
+                        'tiempo_horas': t_conservador / 3600
+                    })
+            
+            # Escenario agresivo (n=1)
+            if n != 1:
+                t_agresivo = (R_req + 1 * sigma_0) / (v_rel - 1 * k) if (v_rel - 1 * k) > 0 else None
+                if t_agresivo:
+                    escenarios.append({
+                        'nombre': 'Agresivo (1σ)',
+                        'tiempo_segundos': t_agresivo,
+                        'tiempo_horas': t_agresivo / 3600
+                    })
+            
+            # Análisis de sensibilidad
+            sensibilidad = {
+                'impacto_v_rel': {
+                    'descripcion': 'Efecto de ±10% en velocidad relativa',
+                    'v_rel_high': v_rel * 1.1,
+                    't_high': (numerador) / (v_rel * 1.1 - n * k) if (v_rel * 1.1 - n * k) > 0 else None,
+                    'v_rel_low': v_rel * 0.9,
+                    't_low': (numerador) / (v_rel * 0.9 - n * k) if (v_rel * 0.9 - n * k) > 0 else None
+                },
+                'impacto_incertidumbre': {
+                    'descripcion': 'Efecto de ±50% en incertidumbre',
+                    'sigma_high': sigma_0 * 1.5,
+                    't_sigma_high': (R_req + n * sigma_0 * 1.5) / denominador,
+                    'sigma_low': sigma_0 * 0.5,
+                    't_sigma_low': (R_req + n * sigma_0 * 0.5) / denominador
+                }
+            }
+            
+            return {
+                'parametros': {
+                    'v_rel_ms': v_rel,
+                    'R_req_m': R_req,
+                    'sigma_0_m': sigma_0,
+                    'k_ms': k,
+                    'factor_confianza': n
+                },
+                'tiempo_maniobra': {
+                    'segundos': t_maneuver_seconds,
+                    'minutos': t_minutes,
+                    'horas': t_hours,
+                    'dias': t_days
+                },
+                'evaluacion': {
+                    'criticidad': criticidad,
+                    'recomendacion': recomendacion
+                },
+                'componentes_calculo': {
+                    'numerador': numerador,
+                    'denominador': denominador,
+                    'margen_seguridad': denominador - n * k
+                },
+                'escenarios_alternativos': escenarios,
+                'analisis_sensibilidad': sensibilidad,
+                'interpretacion': {
+                    'contexto_leo': self._get_leo_context(v_rel),
+                    'recomendaciones_operacionales': self._get_operational_recommendations(t_hours, v_rel)
+                }
+            }
+            
+        except Exception as e:
+            return {'error': f'Error en cálculo: {str(e)}'}
+    
+    def _get_leo_context(self, v_rel: float) -> Dict:
+        """Proporcionar contexto específico para órbitas LEO"""
+        if v_rel < 500:
+            tipo_encuentro = "Co-orbital o encuentro suave"
+            descripcion = "Satélites en órbitas similares con baja velocidad relativa"
+        elif v_rel < 2000:
+            tipo_encuentro = "Encuentro lateral"
+            descripcion = "Cruce de órbitas con ángulo moderado"
+        elif v_rel < 8000:
+            tipo_encuentro = "Encuentro perpendicular"
+            descripcion = "Órbitas con planos orbitales diferentes"
+        else:
+            tipo_encuentro = "Encuentro frontal"
+            descripcion = "Órbitas con inclinaciones opuestas - máximo riesgo"
+            
+        return {
+            'tipo_encuentro': tipo_encuentro,
+            'descripcion': descripcion,
+            'velocidad_relativa_ms': v_rel,
+            'velocidad_relativa_kmh': v_rel * 3.6
+        }
+    
+    def _get_operational_recommendations(self, t_hours: float, v_rel: float) -> List[str]:
+        """Generar recomendaciones operacionales específicas"""
+        recomendaciones = []
+        
+        if t_hours < 1:
+            recomendaciones.extend([
+                "🚨 Activar protocolo de emergencia",
+                "📡 Contactar inmediatamente con el centro de control",
+                "⚡ Ejecutar maniobra de emergencia pre-programada",
+                "📊 Monitoreo continuo de telemetría"
+            ])
+        elif t_hours < 6:
+            recomendaciones.extend([
+                "📋 Preparar plan de maniobra detallado",
+                "🔍 Refinar datos orbitales con mediciones adicionales",
+                "👥 Notificar a otros operadores satelitales",
+                "⚙️ Verificar sistemas de propulsión"
+            ])
+        elif t_hours < 24:
+            recomendaciones.extend([
+                "📈 Realizar análisis de conjunción detallado",
+                "🛰️ Considerar maniobras coordinadas si aplica",
+                "📡 Incrementar frecuencia de tracking",
+                "💾 Documentar procedimientos para caso similar"
+            ])
+        else:
+            recomendaciones.extend([
+                "🔬 Análisis exhaustivo de múltiples escenarios",
+                "🤝 Coordinación con agencias espaciales",
+                "📊 Optimización de combustible para maniobra",
+                "🎯 Planificación de maniobra de precisión"
+            ])
+            
+        # Recomendaciones específicas por velocidad relativa
+        if v_rel > 10000:
+            recomendaciones.append("⚠️ Encuentro de alta velocidad - considerar maniobra temprana")
+        elif v_rel < 500:
+            recomendaciones.append("🔄 Encuentro lento - maniobra de larga duración posible")
+            
+        return recomendaciones
     
     def plot_orbit(self, satellite_name: str, hours: int = 24) -> bool:
         """
@@ -841,6 +1069,805 @@ class SatelliteAnalyzer:
         
         return True
     
+    def comprehensive_collision_analysis(self, satellite1_name: str, satellite2_name: str = None,
+                                       threshold_km: float = 10.0, days_ahead: int = 7) -> Dict:
+        """
+        Análisis completo de colisión incluyendo cálculo de tiempo de maniobra
+        
+        Args:
+            satellite1_name: Primer satélite a analizar
+            satellite2_name: Segundo satélite (si None, analiza contra muestra)
+            threshold_km: Distancia mínima para considerar riesgo (km)
+            days_ahead: Días a analizar hacia el futuro
+            
+        Returns:
+            Dict: Análisis completo de colisión y tiempo de maniobra
+        """
+        print(f"🔍 Iniciando análisis completo de colisión para {satellite1_name}...")
+        
+        # Realizar análisis de colisión básico
+        collision_analysis = self.analyze_collision_risk(
+            satellite1_name, satellite2_name, threshold_km, days_ahead
+        )
+        
+        if 'error' in collision_analysis:
+            return collision_analysis
+        
+        # Si hay encuentros cercanos, calcular parámetros de maniobra
+        maneuver_analyses = []
+        
+        if collision_analysis['close_encounters']:
+            print(f"⚠️  {len(collision_analysis['close_encounters'])} encuentros cercanos detectados")
+            
+            for encounter in collision_analysis['close_encounters'][:5]:  # Analizar los primeros 5
+                # Calcular velocidad relativa estimada para el encuentro
+                sat1_pos = np.array(encounter['satellite1_pos'])
+                sat2_pos = np.array(encounter['satellite2_pos'])
+                distance_km = encounter['distance_km']
+                
+                # Estimar velocidad relativa basada en la órbita LEO típica
+                # Para satélites LEO: velocidad orbital ~7.8 km/s
+                orbital_velocity = 7800  # m/s
+                
+                # Estimar velocidad relativa basada en el tipo de encuentro
+                if distance_km < 1:
+                    # Encuentro muy cercano, probablemente frontal
+                    v_rel_estimate = orbital_velocity * 1.8  # ~14,000 m/s
+                elif distance_km < 5:
+                    # Encuentro cercano, ángulo moderado  
+                    v_rel_estimate = orbital_velocity * 1.2  # ~9,400 m/s
+                else:
+                    # Encuentro lejano, paralelo
+                    v_rel_estimate = orbital_velocity * 0.2  # ~1,560 m/s
+                
+                # Parámetros típicos para análisis
+                params_scenarios = [
+                    {
+                        'nombre': 'Conservador',
+                        'R_req': 1000,  # 1 km de seguridad
+                        'sigma_0': 200,  # 200 m de incertidumbre
+                        'k': 0.002,     # Crecimiento moderado
+                        'n': 3          # 3 sigma
+                    },
+                    {
+                        'nombre': 'Estándar',
+                        'R_req': 500,   # 500 m de seguridad
+                        'sigma_0': 100,  # 100 m de incertidumbre
+                        'k': 0.001,     # Crecimiento normal
+                        'n': 2.5        # 2.5 sigma
+                    },
+                    {
+                        'nombre': 'Agresivo',
+                        'R_req': 200,   # 200 m de seguridad
+                        'sigma_0': 50,   # 50 m de incertidumbre
+                        'k': 0.0005,    # Bajo crecimiento
+                        'n': 2          # 2 sigma
+                    }
+                ]
+                
+                encounter_maneuvers = []
+                
+                for scenario in params_scenarios:
+                    maneuver_calc = self.calculate_maneuver_time(
+                        v_rel=v_rel_estimate,
+                        R_req=scenario['R_req'],
+                        sigma_0=scenario['sigma_0'],
+                        k=scenario['k'],
+                        n=scenario['n']
+                    )
+                    
+                    if 'error' not in maneuver_calc:
+                        encounter_maneuvers.append({
+                            'escenario': scenario['nombre'],
+                            'parametros': scenario,
+                            'tiempo_maniobra': maneuver_calc['tiempo_maniobra'],
+                            'criticidad': maneuver_calc['evaluacion']['criticidad'],
+                            'recomendacion': maneuver_calc['evaluacion']['recomendacion']
+                        })
+                
+                maneuver_analyses.append({
+                    'encuentro': {
+                        'fecha': encounter['datetime'].strftime('%Y-%m-%d %H:%M:%S UTC'),
+                        'satelite_2': encounter['satellite2'],
+                        'distancia_km': distance_km,
+                        'velocidad_relativa_estimada': v_rel_estimate
+                    },
+                    'analisis_maniobra': encounter_maneuvers
+                })
+        
+        # Generar recomendaciones generales
+        recomendaciones_generales = self._generate_general_recommendations(
+            collision_analysis, maneuver_analyses
+        )
+        
+        # Calcular tiempo hasta primer encuentro
+        tiempo_primer_encuentro = None
+        if collision_analysis['close_encounters']:
+            primer_encuentro = min(collision_analysis['close_encounters'], 
+                                 key=lambda x: x['datetime'])
+            tiempo_primer_encuentro = {
+                'fecha': primer_encuentro['datetime'],
+                'horas_restantes': (primer_encuentro['datetime'] - datetime.now()).total_seconds() / 3600,
+                'distancia_km': primer_encuentro['distance_km']
+            }
+        
+        return {
+            'analisis_colision': collision_analysis,
+            'analisis_maniobras': maneuver_analyses,
+            'tiempo_primer_encuentro': tiempo_primer_encuentro,
+            'recomendaciones_generales': recomendaciones_generales,
+            'resumen_ejecutivo': self._generate_executive_summary(
+                collision_analysis, maneuver_analyses, tiempo_primer_encuentro
+            )
+        }
+    
+    def _generate_general_recommendations(self, collision_analysis: Dict, 
+                                        maneuver_analyses: List[Dict]) -> List[str]:
+        """Generar recomendaciones generales basadas en el análisis"""
+        recommendations = []
+        
+        risk_level = collision_analysis.get('risk_level', 'BAJO')
+        total_encounters = collision_analysis.get('total_encounters', 0)
+        
+        if risk_level == 'CRÍTICO':
+            recommendations.extend([
+                "🚨 ALERTA CRÍTICA: Implementar protocolo de emergencia inmediatamente",
+                "📡 Establecer comunicación continua con centros de control",
+                "⚡ Preparar maniobra de emergencia automática",
+                "🎯 Considerar múltiples opciones de maniobra"
+            ])
+        elif risk_level == 'ALTO':
+            recommendations.extend([
+                "⚠️ RIESGO ALTO: Planificar maniobra en las próximas 24 horas",
+                "📊 Refinar datos orbitales con tracking adicional",
+                "🤝 Coordinar con otros operadores si es necesario",
+                "📋 Preparar plan de contingencia"
+            ])
+        elif risk_level == 'MEDIO':
+            recommendations.extend([
+                "🟡 RIESGO MEDIO: Monitoreo incrementado requerido",
+                "📈 Análisis detallado de conjunción",
+                "🔍 Evaluación de opciones de maniobra",
+                "📅 Planificación preventiva"
+            ])
+        
+        if total_encounters > 3:
+            recommendations.append(f"📊 Múltiples encuentros ({total_encounters}) - considerar cambio orbital mayor")
+        
+        if maneuver_analyses:
+            min_time = min([
+                min([m['tiempo_maniobra']['horas'] for m in analysis['analisis_maniobra']])
+                for analysis in maneuver_analyses if analysis['analisis_maniobra']
+            ], default=float('inf'))
+            
+            if min_time < 1:
+                recommendations.append("⏰ Tiempo de maniobra < 1 hora - Acción inmediata requerida")
+            elif min_time < 6:
+                recommendations.append("⏰ Tiempo de maniobra < 6 horas - Preparación urgente")
+        
+        return recommendations
+    
+    def _generate_executive_summary(self, collision_analysis: Dict, 
+                                  maneuver_analyses: List[Dict], 
+                                  primer_encuentro: Dict) -> Dict:
+        """Generar resumen ejecutivo del análisis"""
+        
+        summary = {
+            'satelite': collision_analysis.get('satellite', 'Desconocido'),
+            'nivel_riesgo': collision_analysis.get('risk_level', 'BAJO'),
+            'total_encuentros': collision_analysis.get('total_encounters', 0),
+            'periodo_analisis_dias': collision_analysis.get('analysis_period_days', 0)
+        }
+        
+        if primer_encuentro:
+            summary['primer_encuentro'] = {
+                'tiempo_horas': primer_encuentro['horas_restantes'],
+                'distancia_km': primer_encuentro['distancia_km'],
+                'fecha': primer_encuentro['fecha'].strftime('%Y-%m-%d %H:%M UTC')
+            }
+        
+        if maneuver_analyses:
+            # Tiempo mínimo de maniobra entre todos los escenarios
+            tiempos_maniobra = []
+            for analysis in maneuver_analyses:
+                for maneuver in analysis['analisis_maniobra']:
+                    tiempos_maniobra.append(maneuver['tiempo_maniobra']['horas'])
+            
+            if tiempos_maniobra:
+                summary['tiempo_maniobra'] = {
+                    'minimo_horas': min(tiempos_maniobra),
+                    'maximo_horas': max(tiempos_maniobra),
+                    'promedio_horas': sum(tiempos_maniobra) / len(tiempos_maniobra)
+                }
+        
+        # Determinar acción recomendada
+        if summary['nivel_riesgo'] == 'CRÍTICO':
+            summary['accion_recomendada'] = "MANIOBRA INMEDIATA"
+        elif summary['nivel_riesgo'] == 'ALTO':
+            summary['accion_recomendada'] = "PREPARAR MANIOBRA URGENTE"
+        elif summary['nivel_riesgo'] == 'MEDIO':
+            summary['accion_recomendada'] = "MONITOREO INCREMENTADO"
+        else:
+            summary['accion_recomendada'] = "SEGUIMIENTO RUTINARIO"
+        
+        return summary
+    
+    def find_collision_cases(self, threshold_km: float = 50.0, days_ahead: int = 7, 
+                           max_satellites: int = 500) -> List[Dict]:
+        """
+        Buscar casos reales de colisión entre satélites
+        Función específica para encontrar encuentros cercanos reales
+        
+        Args:
+            threshold_km: Distancia máxima para considerar encuentro cercano
+            days_ahead: Días a analizar
+            max_satellites: Máximo número de satélites a analizar
+            
+        Returns:
+            List[Dict]: Lista de casos de colisión encontrados
+        """
+        print(f"🔍 BÚSQUEDA EXHAUSTIVA DE CASOS DE COLISIÓN")
+        print(f"📊 Analizando hasta {max_satellites} satélites...")
+        print(f"📏 Umbral: {threshold_km} km | 📅 Período: {days_ahead} días")
+        print("-" * 60)
+        
+        collision_cases = []
+        satellites_list = list(self.satellites.keys())
+        
+        # Analizar una muestra más grande de satélites
+        sample_size = min(max_satellites, len(satellites_list))
+        sample_satellites = satellites_list[:sample_size]
+        
+        analyzed_pairs = set()  # Evitar analizar el mismo par dos veces
+        
+        for i, sat1_name in enumerate(sample_satellites):
+            if i % 50 == 0:  # Mostrar progreso cada 50 satélites
+                progress = (i / sample_size) * 100
+                print(f"📈 Progreso: {progress:.1f}% ({i}/{sample_size}) - Casos encontrados: {len(collision_cases)}")
+            
+            try:
+                sat1 = self.satellites[sat1_name]['satellite']
+                
+                # Analizar contra una submuestra de otros satélites
+                for j, sat2_name in enumerate(sample_satellites[i+1:i+51], i+1):  # Siguientes 50
+                    if j >= len(sample_satellites):
+                        break
+                        
+                    pair = tuple(sorted([sat1_name, sat2_name]))
+                    if pair in analyzed_pairs:
+                        continue
+                    analyzed_pairs.add(pair)
+                    
+                    try:
+                        sat2 = self.satellites[sat2_name]['satellite']
+                        
+                        # Verificar encuentros cada 2 horas para mayor precisión
+                        for hours in range(0, days_ahead * 24, 2):
+                            t = self.ts.tt_jd(self.ts.now().tt + hours / 24)
+                            
+                            pos1 = sat1.at(t)
+                            pos2 = sat2.at(t)
+                            
+                            # Calcular distancia
+                            distance_km = np.linalg.norm(
+                                np.array(pos1.position.km) - np.array(pos2.position.km)
+                            )
+                            
+                            if distance_km < threshold_km:
+                                # ¡Encontramos un caso de colisión!
+                                collision_cases.append({
+                                    'satellite1': sat1_name,
+                                    'satellite2': sat2_name,
+                                    'datetime': t.utc_datetime(),
+                                    'distance_km': distance_km,
+                                    'hours_from_now': hours,
+                                    'satellite1_pos': pos1.position.km,
+                                    'satellite2_pos': pos2.position.km,
+                                    'relative_velocity_estimated': self._estimate_relative_velocity(
+                                        pos1.position.km, pos2.position.km, distance_km
+                                    )
+                                })
+                                
+                                print(f"🚨 CASO ENCONTRADO: {sat1_name} vs {sat2_name}")
+                                print(f"   📅 {t.utc_datetime().strftime('%Y-%m-%d %H:%M')} UTC")
+                                print(f"   📏 Distancia: {distance_km:.2f} km")
+                                
+                                # Si encontramos varios casos, no necesitamos más
+                                if len(collision_cases) >= 5:
+                                    print(f"✅ Suficientes casos encontrados. Deteniendo búsqueda.")
+                                    return collision_cases
+                                    
+                    except Exception as e:
+                        continue  # Continuar con el siguiente satélite
+                        
+            except Exception as e:
+                continue  # Continuar con el siguiente satélite principal
+        
+        print(f"✅ Búsqueda completada. Casos encontrados: {len(collision_cases)}")
+        return collision_cases
+    
+    def _estimate_relative_velocity(self, pos1: np.ndarray, pos2: np.ndarray, 
+                                  distance_km: float) -> float:
+        """Estimar velocidad relativa basada en posiciones y distancia"""
+        # Velocidad orbital típica en LEO
+        orbital_speed = 7800  # m/s
+        
+        # Estimar basado en la distancia del encuentro
+        if distance_km < 5:
+            return orbital_speed * 1.8  # Encuentro frontal probable
+        elif distance_km < 20:
+            return orbital_speed * 1.2  # Encuentro angular
+        else:
+            return orbital_speed * 0.5  # Encuentro lateral
+    
+    def demonstrate_collision_case(self) -> None:
+        """
+        Demostrar un caso de colisión encontrado con análisis completo
+        """
+        print("🔍 DEMOSTRACIÓN DE CASO DE COLISIÓN REAL")
+        print("=" * 60)
+        
+        # Buscar casos de colisión
+        cases = self.find_collision_cases(threshold_km=100, days_ahead=3, max_satellites=200)
+        
+        if not cases:
+            print("❌ No se encontraron casos de colisión en la muestra analizada")
+            print("💡 Esto puede ocurrir porque:")
+            print("   • Los satélites están bien separados")
+            print("   • La muestra analizada es pequeña")
+            print("   • Los umbrales son muy estrictos")
+            print("\n🎭 Generando caso simulado para demostración...")
+            
+            # Crear un caso simulado basado en datos reales
+            self._create_simulated_case()
+            return
+        
+        # Analizar el primer caso encontrado
+        case = cases[0]
+        print(f"\n🚨 CASO DE COLISIÓN DETECTADO:")
+        print(f"🛰️  Satélite 1: {case['satellite1']}")
+        print(f"🛰️  Satélite 2: {case['satellite2']}")
+        print(f"📅 Fecha/Hora: {case['datetime'].strftime('%Y-%m-%d %H:%M')} UTC")
+        print(f"📏 Distancia: {case['distance_km']:.2f} km")
+        print(f"⏰ En: {case['hours_from_now']} horas")
+        
+        # Calcular tiempo de maniobra para este caso
+        v_rel = case['relative_velocity_estimated']
+        print(f"\n⚡ ANÁLISIS DE TIEMPO DE MANIOBRA:")
+        print(f"🚀 Velocidad relativa estimada: {v_rel:.0f} m/s")
+        
+        # Varios escenarios de maniobra
+        scenarios = [
+            {'name': 'Conservador', 'R_req': 2000, 'sigma_0': 200, 'k': 0.002, 'n': 3},
+            {'name': 'Estándar', 'R_req': 1000, 'sigma_0': 100, 'k': 0.001, 'n': 2.5},
+            {'name': 'Agresivo', 'R_req': 500, 'sigma_0': 50, 'k': 0.0008, 'n': 2}
+        ]
+        
+        print(f"\n📊 ESCENARIOS DE MANIOBRA:")
+        for scenario in scenarios:
+            result = self.calculate_maneuver_time(
+                v_rel=v_rel,
+                R_req=scenario['R_req'],
+                sigma_0=scenario['sigma_0'],
+                k=scenario['k'],
+                n=scenario['n']
+            )
+            
+            if 'error' not in result:
+                tiempo = result['tiempo_maniobra']
+                print(f"   • {scenario['name']}: {tiempo['horas']:.2f} horas")
+                print(f"     {result['evaluacion']['criticidad']}")
+            else:
+                print(f"   • {scenario['name']}: {result['error']}")
+        
+        # Mostrar todos los casos encontrados
+        if len(cases) > 1:
+            print(f"\n📋 OTROS CASOS DETECTADOS:")
+            for i, other_case in enumerate(cases[1:], 2):
+                print(f"   {i}. {other_case['satellite1']} vs {other_case['satellite2']}")
+                print(f"      📅 {other_case['datetime'].strftime('%Y-%m-%d %H:%M')} UTC")
+                print(f"      📏 {other_case['distance_km']:.2f} km")
+    
+    def _create_simulated_case(self) -> None:
+        """Crear un caso simulado basado en satélites reales"""
+        print("🎭 CASO SIMULADO DE DEMOSTRACIÓN:")
+        print("=" * 50)
+        
+        # Usar satélites reales para crear escenario creíble
+        satellite_names = list(self.satellites.keys())
+        sat1 = satellite_names[10] if len(satellite_names) > 10 else satellite_names[0]
+        sat2 = satellite_names[50] if len(satellite_names) > 50 else satellite_names[1]
+        
+        import datetime
+        future_time = datetime.datetime.now() + datetime.timedelta(hours=28, minutes=45)
+        
+        print(f"🛰️  Satélite 1: {sat1}")
+        print(f"🛰️  Satélite 2: {sat2}")
+        print(f"📅 Encuentro proyectado: {future_time.strftime('%Y-%m-%d %H:%M')} UTC")
+        print(f"📏 Distancia mínima estimada: 15.3 km")
+        print(f"🚀 Velocidad relativa: 8,200 m/s")
+        print(f"⏰ Tiempo hasta encuentro: 28.75 horas")
+        
+        print(f"\n⚡ ANÁLISIS DE TIEMPO DE MANIOBRA:")
+        result = self.calculate_maneuver_time(
+            v_rel=8200,
+            R_req=1000,
+            sigma_0=120,
+            k=0.001,
+            n=3
+        )
+        
+        if 'error' not in result:
+            tiempo = result['tiempo_maniobra']
+            print(f"⏰ Tiempo de maniobra requerido: {tiempo['horas']:.2f} horas")
+            print(f"{result['evaluacion']['criticidad']}")
+            print(f"💡 {result['evaluacion']['recomendacion']}")
+            
+            print(f"\n📊 EVALUACIÓN:")
+            tiempo_disponible = 28.75
+            tiempo_requerido = tiempo['horas']
+            
+            if tiempo_disponible > tiempo_requerido:
+                margen = tiempo_disponible - tiempo_requerido
+                print(f"✅ MARGEN SEGURO: {margen:.1f} horas disponibles")
+                print(f"🎯 Ejecutar maniobra antes de: {(future_time - datetime.timedelta(hours=tiempo_requerido)).strftime('%Y-%m-%d %H:%M')} UTC")
+            else:
+                deficit = tiempo_requerido - tiempo_disponible
+                print(f"🚨 SITUACIÓN CRÍTICA: Déficit de {deficit:.1f} horas")
+                print(f"⚡ Maniobra inmediata requerida")
+        
+        print(f"\n💡 Este es un ejemplo de cómo el sistema detectaría y analizaría")
+        print(f"   un caso real de conjunción satelital.")
+
+
+# NUEVO MÓDULO PARA EL HACKATÓN - SISTEMA ISL CONTROL
+class ISLControlSystem:
+    """
+    Sistema de Control de Enlaces Inter-Satelitales (ISL) con conciencia de propulsión
+    
+    Este módulo simula la lógica que se ejecutaría en el chip IENAI para:
+    - Gestionar el tráfico de red satelital basado en riesgo de colisión
+    - Optimizar el enrutamiento considerando el estado del propulsor
+    - Tomar decisiones autónomas de maniobra y comunicación
+    """
+    
+    def __init__(self, analyzer: SatelliteAnalyzer):
+        self.analyzer = analyzer
+        self.network_nodes = []  # Lista de satélites en la red
+        self.current_routes = {}  # Rutas actuales de comunicación
+        
+    def determine_thrust_aware_routing(self, sat_local_name: str, sat_neighbor_name: str, 
+                                       collision_risk_data: Dict, propellant_level: float) -> Dict:
+        """
+        Simula la lógica de enrutamiento basada en el riesgo de colisión y el estado del propulsor IENAI.
+        ESTA FUNCIÓN SE EJECUTARÍA EN EL CHIP DEL IENAI.
+        
+        Args:
+            sat_local_name: Nombre del satélite local (este satélite)
+            sat_neighbor_name: Satélite vecino en la red
+            collision_risk_data: Datos de riesgo de colisión
+            propellant_level: Nivel de propelente (0.0 a 1.0)
+            
+        Returns:
+            Dict: Comandos y decisiones del sistema ISL
+        """
+        
+        # 1. Evaluar si se necesita una maniobra (usando la lógica existente)
+        risk_level = collision_risk_data.get('risk_level', 'BAJO')
+        close_encounters = collision_risk_data.get('close_encounters', [])
+        
+        # 2. Calcular parámetros de maniobra basados en el riesgo
+        maneuver_analysis = None
+        time_to_maneuver_hours = float('inf')
+        
+        if risk_level in ['ALTO', 'CRÍTICO'] and close_encounters:
+            # Obtener el encuentro más cercano
+            nearest_encounter = min(close_encounters, key=lambda x: x['distance_km'])
+            
+            # Estimar velocidad relativa basada en la distancia del encuentro
+            if nearest_encounter['distance_km'] < 5:
+                v_rel_estimate = 12000  # Encuentro frontal crítico
+            elif nearest_encounter['distance_km'] < 20:
+                v_rel_estimate = 8000   # Encuentro perpendicular
+            else:
+                v_rel_estimate = 3000   # Encuentro lateral
+            
+            # Calcular tiempo de maniobra requerido
+            maneuver_analysis = self.analyzer.calculate_maneuver_time(
+                v_rel=v_rel_estimate,
+                R_req=500.0,     # 500m de seguridad para satélites comerciales
+                sigma_0=100.0,   # 100m de incertidumbre estándar
+                k=0.001,         # Crecimiento normal de incertidumbre
+                n=3.0            # 3 sigma de confianza
+            )
+            
+            if 'error' not in maneuver_analysis:
+                time_to_maneuver_hours = maneuver_analysis['tiempo_maniobra']['horas']
+        
+        # 3. LÓGICA DE DECISIÓN ISL (El corazón del proyecto)
+        decision_result = self._make_isl_decision(
+            sat_local_name, sat_neighbor_name, risk_level, 
+            time_to_maneuver_hours, propellant_level, maneuver_analysis
+        )
+        
+        return decision_result
+    
+    def _make_isl_decision(self, sat_local: str, sat_neighbor: str, risk_level: str,
+                          time_hours: float, propellant: float, maneuver_data: Dict) -> Dict:
+        """
+        Núcleo de la lógica de decisión ISL
+        """
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Clasificar urgencia temporal
+        if time_hours < 1:
+            urgency = "CRÍTICO_INMEDIATO"
+        elif time_hours < 6:
+            urgency = "CRÍTICO_CORTO_PLAZO"
+        elif time_hours < 24:
+            urgency = "MODERADO"
+        else:
+            urgency = "BAJO"
+        
+        # DECISION TREE PRINCIPAL
+        if urgency in ["CRÍTICO_INMEDIATO", "CRÍTICO_CORTO_PLAZO"]:
+            if propellant > 0.15:  # Suficiente combustible (>15%)
+                command = "THRUST_IMMINENT"
+                action = f"Preparando maniobra de evasión. Desviando tráfico crítico al satélite {sat_neighbor}"
+                network_priority = "HIGH_REROUTE"
+                bandwidth_allocation = 0.2  # 20% del ancho de banda para coordinar maniobra
+                
+            elif propellant > 0.05:  # Combustible limitado (5-15%)
+                command = "THRUST_CONDITIONAL"
+                action = f"Maniobra condicional. Evaluando alternativas. Alertando a {sat_neighbor}"
+                network_priority = "MEDIUM_REROUTE"
+                bandwidth_allocation = 0.1  # 10% para coordinación
+                
+            else:  # Combustible insuficiente (<5%)
+                command = "THRUST_IMPOSSIBLE"
+                action = f"Combustible insuficiente. Emitiendo alerta de posición. Transferencia total a {sat_neighbor}"
+                network_priority = "EMERGENCY_REROUTE"
+                bandwidth_allocation = 0.05  # 5% mínimo para alertas
+                
+        elif urgency == "MODERADO":
+            if propellant > 0.25:  # Buen nivel de combustible
+                command = "THRUST_PLANNED"
+                action = f"Maniobra planificada. Coordinando con {sat_neighbor} para redistribución de tráfico"
+                network_priority = "PLANNED_REROUTE"
+                bandwidth_allocation = 0.8  # 80% operación normal
+                
+            else:
+                command = "THRUST_PRESERVE"
+                action = f"Conservando combustible. Solicitando soporte de red a {sat_neighbor}"
+                network_priority = "FUEL_CONSERVATION"
+                bandwidth_allocation = 0.6  # 60% operación reducida
+                
+        else:  # BAJO riesgo
+            command = "ROUTE_NORMAL"
+            action = "Operación normal. Sin amenaza inmediata de colisión"
+            network_priority = "NORMAL"
+            bandwidth_allocation = 1.0  # 100% operación normal
+        
+        # Generar protocolo de comunicación ISL
+        isl_protocol = self._generate_isl_protocol(
+            command, sat_local, sat_neighbor, urgency, propellant
+        )
+        
+        return {
+            'timestamp': timestamp,
+            'command': command,
+            'action': action,
+            'urgency_level': urgency,
+            'risk_assessment': risk_level,
+            'propellant_status': f"{propellant*100:.1f}%",
+            'time_to_maneuver_hours': time_hours,
+            'network_priority': network_priority,
+            'bandwidth_allocation': bandwidth_allocation,
+            'target_satellite': sat_neighbor,
+            'isl_protocol': isl_protocol,
+            'maneuver_data': maneuver_data,
+            'autonomous_decision': True,
+            'chip_location': 'IENAI_PROCESSOR'
+        }
+    
+    def _generate_isl_protocol(self, command: str, sat_local: str, sat_neighbor: str,
+                              urgency: str, propellant: float) -> Dict:
+        """
+        Generar protocolo de comunicación entre satélites
+        """
+        protocol = {
+            'message_type': 'ISL_COORDINATION',
+            'source': sat_local,
+            'destination': sat_neighbor,
+            'priority': 'HIGH' if urgency.startswith('CRÍTICO') else 'MEDIUM',
+            'encryption': 'AES256_QUANTUM_SAFE',
+            'compression': 'SATELLITE_OPTIMIZED'
+        }
+        
+        if command == "THRUST_IMMINENT":
+            protocol['payload'] = {
+                'alert_type': 'IMMINENT_MANEUVER',
+                'maneuver_window': '< 1 hour',
+                'requested_action': 'TAKE_TRAFFIC_LOAD',
+                'backup_required': True,
+                'telemetry_sharing': True
+            }
+        elif command == "THRUST_IMPOSSIBLE":
+            protocol['payload'] = {
+                'alert_type': 'PROPULSION_FAILURE',
+                'maneuver_capability': False,
+                'requested_action': 'EMERGENCY_BACKUP',
+                'position_alert': True,
+                'ground_notification': True
+            }
+        elif command == "ROUTE_NORMAL":
+            protocol['payload'] = {
+                'alert_type': 'STATUS_NORMAL',
+                'maneuver_capability': True,
+                'requested_action': 'MAINTAIN_NORMAL_OPS',
+                'health_check': True
+            }
+        else:
+            protocol['payload'] = {
+                'alert_type': 'CONDITIONAL_MANEUVER',
+                'maneuver_probability': f"{min(1.0, (1.0 - propellant) + 0.5):.2f}",
+                'requested_action': 'STANDBY_SUPPORT',
+                'monitoring_required': True
+            }
+        
+        return protocol
+    
+    def simulate_constellation_response(self, decision_result: Dict, 
+                                      constellation_size: int = 5) -> Dict:
+        """
+        Simular la respuesta de una constelación de satélites al comando ISL
+        """
+        constellation_response = {
+            'constellation_id': 'IENAI_NETWORK_ALPHA',
+            'total_satellites': constellation_size,
+            'responding_satellites': [],
+            'network_adaptation': {},
+            'collective_decision': None
+        }
+        
+        # Simular respuesta de otros satélites
+        for i in range(constellation_size):
+            sat_id = f"IENAI_SAT_{i+1:02d}"
+            if sat_id != decision_result.get('target_satellite', ''):
+                
+                # Simular capacidad de cada satélite
+                sat_capacity = np.random.uniform(0.6, 1.0)  # 60-100% capacidad
+                sat_fuel = np.random.uniform(0.1, 0.9)      # 10-90% combustible
+                
+                response = {
+                    'satellite_id': sat_id,
+                    'available_capacity': f"{sat_capacity*100:.1f}%",
+                    'fuel_level': f"{sat_fuel*100:.1f}%",
+                    'can_assist': sat_capacity > 0.3,
+                    'priority_level': 'HIGH' if sat_capacity > 0.7 else 'MEDIUM'
+                }
+                
+                constellation_response['responding_satellites'].append(response)
+        
+        # Calcular adaptación de red
+        total_capacity = sum([float(sat['available_capacity'].rstrip('%'))/100 
+                            for sat in constellation_response['responding_satellites']])
+        
+        constellation_response['network_adaptation'] = {
+            'total_available_capacity': f"{total_capacity*100:.1f}%",
+            'load_distribution': 'AUTOMATIC',
+            'failover_ready': total_capacity > 1.5,
+            'latency_impact': 'MINIMAL' if total_capacity > 2.0 else 'MODERATE'
+        }
+        
+        # Decisión colectiva de la constelación
+        if decision_result['urgency_level'].startswith('CRÍTICO'):
+            constellation_response['collective_decision'] = 'EMERGENCY_PROTOCOL_ACTIVATED'
+        elif total_capacity > 1.8:
+            constellation_response['collective_decision'] = 'FULL_SUPPORT_GRANTED'
+        else:
+            constellation_response['collective_decision'] = 'LIMITED_SUPPORT_AVAILABLE'
+        
+        return constellation_response
+
+
+class HackathonDemo:
+    """
+    Clase para demostrar el sistema ISL en el hackathon
+    """
+    
+    def __init__(self, analyzer: SatelliteAnalyzer):
+        self.analyzer = analyzer
+        self.isl_system = ISLControlSystem(analyzer)
+        
+    def run_complete_demo(self):
+        """
+        Ejecutar demostración completa del sistema ISL para el hackathon
+        """
+        print("🚀 DEMOSTRACIÓN COMPLETA DEL SISTEMA ISL-IENAI")
+        print("=" * 70)
+        print("🎯 Sistema de Control de Enlaces Inter-Satelitales con Conciencia de Propulsión")
+        print("💡 Simulando operación autónoma en chip IENAI")
+        print("-" * 70)
+        
+        # Escenarios de prueba
+        scenarios = [
+            {
+                'name': '🔴 ESCENARIO CRÍTICO: Encuentro Frontal Inminente',
+                'risk_data': {
+                    'risk_level': 'CRÍTICO',
+                    'close_encounters': [{'distance_km': 2.5, 'datetime': datetime.now()}]
+                },
+                'propellant': 0.85,  # 85% combustible
+                'description': 'Satélite con buen combustible detecta colisión inminente'
+            },
+            {
+                'name': '🟠 ESCENARIO CRÍTICO: Combustible Bajo',
+                'risk_data': {
+                    'risk_level': 'ALTO',
+                    'close_encounters': [{'distance_km': 8.3, 'datetime': datetime.now()}]
+                },
+                'propellant': 0.03,  # 3% combustible
+                'description': 'Satélite con combustible crítico detecta amenaza'
+            },
+            {
+                'name': '🟡 ESCENARIO MODERADO: Encuentro Planificado',
+                'risk_data': {
+                    'risk_level': 'MEDIO',
+                    'close_encounters': [{'distance_km': 25.7, 'datetime': datetime.now()}]
+                },
+                'propellant': 0.60,  # 60% combustible
+                'description': 'Encuentro detectado con tiempo para planificar'
+            },
+            {
+                'name': '🟢 ESCENARIO NORMAL: Operación Rutinaria',
+                'risk_data': {
+                    'risk_level': 'BAJO',
+                    'close_encounters': []
+                },
+                'propellant': 0.75,  # 75% combustible
+                'description': 'Operación normal sin amenazas detectadas'
+            }
+        ]
+        
+        for i, scenario in enumerate(scenarios, 1):
+            print(f"\n{i}. {scenario['name']}")
+            print(f"   📝 {scenario['description']}")
+            print(f"   ⛽ Combustible: {scenario['propellant']*100:.1f}%")
+            
+            # Ejecutar análisis ISL
+            decision = self.isl_system.determine_thrust_aware_routing(
+                sat_local_name="IENAI_SAT_01",
+                sat_neighbor_name="IENAI_SAT_02", 
+                collision_risk_data=scenario['risk_data'],
+                propellant_level=scenario['propellant']
+            )
+            
+            # Mostrar resultados
+            print(f"   🤖 DECISIÓN AUTÓNOMA: {decision['command']}")
+            print(f"   ⚡ Acción: {decision['action']}")
+            print(f"   📡 Prioridad de red: {decision['network_priority']}")
+            print(f"   📊 Ancho de banda: {decision['bandwidth_allocation']*100:.0f}%")
+            
+            if decision['time_to_maneuver_hours'] < float('inf'):
+                print(f"   ⏰ Tiempo para maniobra: {decision['time_to_maneuver_hours']:.2f} horas")
+            
+            # Simular respuesta de constelación
+            constellation_response = self.isl_system.simulate_constellation_response(decision)
+            print(f"   🛰️  Respuesta de constelación: {constellation_response['collective_decision']}")
+            print(f"   🌐 Capacidad disponible: {constellation_response['network_adaptation']['total_available_capacity']}")
+            
+            print("   " + "-" * 50)
+        
+        print(f"\n✅ DEMOSTRACIÓN COMPLETADA")
+        print(f"🎯 El sistema ISL-IENAI está listo para:")
+        print(f"   • Detección autónoma de riesgos de colisión")
+        print(f"   • Toma de decisiones basada en estado de propulsión")
+        print(f"   • Gestión inteligente de red satelital")
+        print(f"   • Coordinación de constelación en tiempo real")
+        print(f"   • Operación completamente autónoma en el espacio")
+    
+    
     def plot_orbital_animation(self, satellite_name: str, hours: int = 24, frames: int = 100) -> bool:
         """
         Crear una animación de la órbita del satélite alrededor de la Tierra
@@ -1052,7 +2079,12 @@ def mostrar_menu():
     print("   7. Visualización 3D (Tierra + Satélites)")
     print("   8. Animación orbital 3D")
     print("   9. Exportar lista completa de satélites")
-    print("  10. Salir")
+    print("  10. Cálculo de tiempo de maniobra de evasión")
+    print("  11. Análisis completo de colisión + maniobra")
+    print("  12. 🔍 BUSCAR CASOS REALES DE COLISIÓN")
+    print("  13. 🚀 DEMO SISTEMA ISL-IENAI (HACKATHON)")
+    print("  14. 🤖 Simulador ISL Individual")
+    print("  15. Salir")
     print("=" * 60)
 
 
@@ -1060,7 +2092,7 @@ def main():
     """Función principal del programa"""
     print("=" * 60)
     print("🛰️  SISTEMA DE ANÁLISIS DE SATÉLITES")
-    print("    NASA Space App Challenge 2025")
+    print("    NASA Space App Challenge 2025 - Malkie Space")
     print("=" * 60)
     
     # Inicializar el analizador
@@ -1080,7 +2112,7 @@ def main():
             # Mostrar menú en cada iteración
             mostrar_menu()
             print("\n" + "-" * 40)
-            option = input("Selecciona una opción (1-10): ").strip()
+            option = input("Selecciona una opción (1-15): ").strip()
             
             if option == '1':
                 # Búsqueda inteligente de satélite
@@ -1118,6 +2150,377 @@ def main():
                         # Mostrar ejemplos populares
                         print("\n🌟 ¿Quizás buscabas alguno de estos satélites populares?")
                         analyzer.show_satellite_examples()
+                        
+            elif option == '2':
+                # Ver satélites populares por categoría
+                print("🌟 Satélites populares por categoría:")
+                popular = analyzer.get_popular_satellites()
+                for category, satellites in popular.items():
+                    print(f"\n📂 {category.upper()}:")
+                    for i, name in enumerate(satellites, 1):
+                        print(f"   {i}. {name}")
+                        
+            elif option == '3':
+                # Información detallada de un satélite
+                sat_name = input("📋 Nombre del satélite: ").strip()
+                if sat_name:
+                    info = analyzer.get_satellite_info(sat_name)
+                    if 'error' not in info:
+                        print(f"\n🛰️  INFORMACIÓN DETALLADA: {sat_name}")
+                        print("=" * 50)
+                        print(f"📅 Fecha de los datos: {info['current_time']}")
+                        print(f"📍 Posición actual:")
+                        print(f"   • Latitud: {info['position']['latitude']:.3f}°")
+                        print(f"   • Longitud: {info['position']['longitude']:.3f}°")
+                        print(f"   • Altitud: {info['position']['altitude']:.1f} km")
+                        print(f"📊 Parámetros orbitales:")
+                        print(f"   • Inclinación: {info['orbital_elements'].get('inclination', 'N/A')}")
+                        print(f"   • Excentricidad: {info['orbital_elements'].get('eccentricity', 'N/A')}")
+                        print(f"   • Período: {info['orbital_elements'].get('period_minutes', 'N/A')} min")
+                    else:
+                        print(f"❌ {info['error']}")
+                        
+            elif option == '4':
+                # Calcular órbitas futuras
+                sat_name = input("🚀 Nombre del satélite: ").strip()
+                if sat_name:
+                    try:
+                        days = int(input("📅 Días a calcular (default 7): ") or "7")
+                        days = min(days, 180)  # Limitar a máximo 180 días
+                        print(f"⏳ Calculando posiciones futuras para {days} días...")
+                        positions = analyzer.calculate_future_positions(sat_name, days)
+                        
+                        if positions:
+                            print(f"\n🛰️  PREDICCIONES ORBITALES: {sat_name}")
+                            print("=" * 60)
+                            for pos in positions[:20]:  # Mostrar primeros 20
+                                print(f"📅 {pos['datetime'].strftime('%Y-%m-%d %H:%M')} UTC")
+                                print(f"   Lat: {pos['latitude']:7.3f}°  Lon: {pos['longitude']:8.3f}°  Alt: {pos['altitude_km']:7.1f} km")
+                            
+                            if len(positions) > 20:
+                                print(f"   ... y {len(positions) - 20} predicciones más")
+                                
+                            # Mostrar estadísticas
+                            altitudes = [pos['altitude_km'] for pos in positions]
+                            print(f"\n📈 ESTADÍSTICAS:")
+                            print(f"   • Altitud mínima: {min(altitudes):.1f} km")
+                            print(f"   • Altitud máxima: {max(altitudes):.1f} km")
+                            print(f"   • Altitud promedio: {sum(altitudes)/len(altitudes):.1f} km")
+                        else:
+                            print("❌ No se pudieron calcular las posiciones")
+                            print("💡 Sugerencias:")
+                            print("   • Verifica que el nombre del satélite sea exacto")
+                            print("   • Usa la opción 1 para buscar satélites disponibles")
+                            print("   • Intenta con nombres populares como: ISS (ZARYA), STARLINK-1007")
+                    except ValueError:
+                        print("❌ Número de días inválido. Debe ser un número entero.")
+                        
+            elif option == '5':
+                # Analizar riesgo de colisión
+                sat_name = input("⚠️  Satélite principal: ").strip()
+                if sat_name:
+                    sat2_name = input("🎯 Segundo satélite (Enter para analizar contra todos): ").strip() or None
+                    try:
+                        threshold = float(input("📏 Distancia mínima en km (default 10): ") or "10")
+                        days = int(input("📅 Días a analizar (4): ") or "4")
+                        
+                        print("⏳ Analizando riesgo de colisión...")
+                        risk_analysis = analyzer.analyze_collision_risk(sat_name, sat2_name, threshold, days)
+                        
+                        if 'error' not in risk_analysis:
+                            print(f"\n⚠️  ANÁLISIS DE RIESGO DE COLISIÓN")
+                            print("=" * 50)
+                            print(f"🛰️  Satélite: {risk_analysis['satellite']}")
+                            print(f"📊 Nivel de riesgo: {risk_analysis['risk_level']}")
+                            print(f"📈 Encuentros cercanos: {risk_analysis['total_encounters']}")
+                            print(f"📅 Período analizado: {risk_analysis['analysis_period_days']} días")
+                            print(f"📏 Umbral: {risk_analysis['threshold_km']} km")
+                            
+                            if risk_analysis['close_encounters']:
+                                print(f"\n🚨 ENCUENTROS CERCANOS DETECTADOS:")
+                                for enc in risk_analysis['close_encounters'][:10]:  # Primeros 10
+                                    print(f"  • {enc['datetime'].strftime('%Y-%m-%d %H:%M')} UTC")
+                                    print(f"    Con: {enc['satellite2']}")
+                                    print(f"    Distancia: {enc['distance_km']:.2f} km")
+                            else:
+                                print("✅ No se detectaron encuentros cercanos")
+                        else:
+                            print(f"❌ {risk_analysis['error']}")
+                    except ValueError:
+                        print("❌ Valores inválidos")
+                        
+            elif option == '6':
+                # Visualizar órbita 2D
+                sat_name = input("📈 Nombre del satélite: ").strip()
+                if sat_name:
+                    try:
+                        hours = int(input("⏰ Horas de órbita a mostrar (default 24): ") or "24")
+                        print("⏳ Generando visualización 2D...")
+                        analyzer.plot_orbit(sat_name, hours)
+                    except ValueError:
+                        print("❌ Número de horas inválido")
+                        
+            elif option == '7':
+                # Visualización 3D de la Tierra con satélites
+                print("🌍 Visualización 3D de satélites alrededor de la Tierra")
+                satellites_input = input("🛰️  Nombres de satélites (separados por coma): ").strip()
+                if satellites_input:
+                    satellite_names = [name.strip() for name in satellites_input.split(',')]
+                    try:
+                        hours = int(input("⏰ Horas de trayectoria (default 12): ") or "12")
+                        print("⏳ Generando visualización 3D...")
+                        analyzer.plot_3d_earth_with_satellites(satellite_names, hours)
+                    except ValueError:
+                        print("❌ Número de horas inválido")
+                        
+            elif option == '8':
+                # Animación orbital 3D
+                sat_name = input("🎬 Nombre del satélite para animar: ").strip()
+                if sat_name:
+                    try:
+                        hours = int(input("⏰ Horas de órbita a animar (default 6): ") or "6")
+                        frames = int(input("🎞️  Número de frames (default 50): ") or "50")
+                        print("⏳ Generando animación 3D...")
+                        analyzer.plot_orbital_animation(sat_name, hours, frames)
+                    except ValueError:
+                        print("❌ Valores inválidos")
+                        
+            elif option == '9':
+                # Exportar lista completa de satélites
+                filename = input("📁 Nombre del archivo (default: satelites_disponibles.txt): ").strip() or "satelites_disponibles.txt"
+                print("⏳ Exportando lista de satélites...")
+                if analyzer.export_satellites_list(filename):
+                    print(f"✅ Lista exportada exitosamente a: {filename}")
+                else:
+                    print("❌ Error al exportar la lista")
+                    
+            elif option == '10':
+                # Cálculo de tiempo de maniobra de evasión
+                print("⏰ CÁLCULO DE TIEMPO DE MANIOBRA DE EVASIÓN")
+                print("=" * 50)
+                try:
+                    v_rel = float(input("🚀 Velocidad relativa (m/s) [100-14000]: "))
+                    R_req = float(input("📏 Distancia de seguridad (m) [default 1000]: ") or "1000")
+                    sigma_0 = float(input("📊 Incertidumbre posicional (m) [default 100]: ") or "100")
+                    k = float(input("📈 Tasa crecimiento incertidumbre (m/s) [default 0.001]: ") or "0.001")
+                    n = float(input("🎯 Factor de confianza (sigma) [default 3]: ") or "3")
+                    
+                    result = analyzer.calculate_maneuver_time(v_rel, R_req, sigma_0, k, n)
+                    
+                    if 'error' not in result:
+                        print(f"\n⏰ RESULTADO DEL ANÁLISIS DE MANIOBRA")
+                        print("=" * 50)
+                        print(f"⚡ Tiempo de maniobra requerido:")
+                        print(f"   • {result['tiempo_maniobra']['segundos']:.1f} segundos")
+                        print(f"   • {result['tiempo_maniobra']['minutos']:.1f} minutos")
+                        print(f"   • {result['tiempo_maniobra']['horas']:.2f} horas")
+                        print(f"   • {result['tiempo_maniobra']['dias']:.3f} días")
+                        
+                        print(f"\n{result['evaluacion']['criticidad']}")
+                        print(f"💡 {result['evaluacion']['recomendacion']}")
+                        
+                        print(f"\n🎯 Contexto del encuentro:")
+                        print(f"   • {result['interpretacion']['contexto_leo']['tipo_encuentro']}")
+                        print(f"   • {result['interpretacion']['contexto_leo']['descripcion']}")
+                        
+                        print(f"\n📋 Recomendaciones operacionales:")
+                        for rec in result['interpretacion']['recomendaciones_operacionales']:
+                            print(f"   {rec}")
+                            
+                        if result['escenarios_alternativos']:
+                            print(f"\n📊 Escenarios alternativos:")
+                            for escenario in result['escenarios_alternativos']:
+                                print(f"   • {escenario['nombre']}: {escenario['tiempo_horas']:.2f} horas")
+                    else:
+                        print(f"❌ {result['error']}")
+                        if 'recommendation' in result:
+                            print(f"💡 {result['recommendation']}")
+                            
+                except ValueError:
+                    print("❌ Valores inválidos. Asegúrate de ingresar números válidos.")
+                    
+            elif option == '11':
+                # Análisis completo de colisión + maniobra
+                print("🔍 ANÁLISIS COMPLETO: COLISIÓN + MANIOBRA")
+                print("=" * 50)
+                sat_name = input("🛰️  Nombre del satélite principal: ").strip()
+                if sat_name:
+                    sat2_name = input("🎯 Segundo satélite (Enter para analizar muestra): ").strip() or None
+                    try:
+                        threshold = float(input("📏 Distancia mínima en km (default 10): ") or "10")
+                        days = int(input("📅 Días a analizar (default 7): ") or "7")
+                        
+                        print("⏳ Realizando análisis completo...")
+                        comprehensive = analyzer.comprehensive_collision_analysis(
+                            sat_name, sat2_name, threshold, days
+                        )
+                        
+                        if 'error' not in comprehensive:
+                            # Mostrar resumen ejecutivo
+                            summary = comprehensive['resumen_ejecutivo']
+                            print(f"\n📊 RESUMEN EJECUTIVO")
+                            print("=" * 40)
+                            print(f"🛰️  Satélite: {summary['satelite']}")
+                            print(f"⚠️  Nivel de riesgo: {summary['nivel_riesgo']}")
+                            print(f"📈 Total encuentros: {summary['total_encuentros']}")
+                            print(f"🎯 Acción recomendada: {summary['accion_recomendada']}")
+                            
+                            if summary.get('primer_encuentro'):
+                                pe = summary['primer_encuentro']
+                                print(f"\n⏰ PRIMER ENCUENTRO:")
+                                print(f"   • Fecha: {pe['fecha']}")
+                                print(f"   • En: {pe['tiempo_horas']:.1f} horas")
+                                print(f"   • Distancia: {pe['distancia_km']:.2f} km")
+                            
+                            if summary.get('tiempo_maniobra'):
+                                tm = summary['tiempo_maniobra']
+                                print(f"\n⚡ TIEMPO DE MANIOBRA:")
+                                print(f"   • Mínimo: {tm['minimo_horas']:.2f} horas")
+                                print(f"   • Máximo: {tm['maximo_horas']:.2f} horas")
+                                print(f"   • Promedio: {tm['promedio_horas']:.2f} horas")
+                            
+                            # Mostrar recomendaciones generales
+                            if comprehensive['recomendaciones_generales']:
+                                print(f"\n💡 RECOMENDACIONES GENERALES:")
+                                for rec in comprehensive['recomendaciones_generales']:
+                                    print(f"   {rec}")
+                            
+                            # Mostrar análisis detallado de maniobras si hay encuentros
+                            if comprehensive['analisis_maniobras']:
+                                print(f"\n📊 ANÁLISIS DETALLADO DE MANIOBRAS:")
+                                for i, analysis in enumerate(comprehensive['analisis_maniobras'][:3], 1):
+                                    encounter = analysis['encuentro']
+                                    print(f"\n   {i}. Encuentro: {encounter['fecha']}")
+                                    print(f"      Con: {encounter['satelite_2']}")
+                                    print(f"      Distancia: {encounter['distancia_km']:.2f} km")
+                                    print(f"      V_rel estimada: {encounter['velocidad_relativa_estimada']:.0f} m/s")
+                                    
+                                    for maneuver in analysis['analisis_maniobra']:
+                                        print(f"      • {maneuver['escenario']}: {maneuver['tiempo_maniobra']['horas']:.2f} horas")
+                                        print(f"        {maneuver['criticidad']}")
+                        else:
+                            print(f"❌ {comprehensive['error']}")
+                            
+                    except ValueError:
+                        print("❌ Valores inválidos")
+                        
+            elif option == '12':
+                # Buscar casos reales de colisión
+                print("🔍 BÚSQUEDA EXHAUSTIVA DE CASOS DE COLISIÓN")
+                print("=" * 50)
+                print("💡 Esta función buscará casos reales de encuentros cercanos")
+                print("   entre satélites en la base de datos actual.")
+                print()
+                
+                try:
+                    threshold = float(input("📏 Umbral de distancia en km (default 75): ") or "75")
+                    days = int(input("📅 Días a analizar (default 3): ") or "3")
+                    max_sats = int(input("🛰️  Máximo satélites a analizar (default 300): ") or "300")
+                    
+                    print("\n⏳ Iniciando búsqueda exhaustiva...")
+                    print("⚠️  Esta operación puede tomar varios minutos...")
+                    
+                    # Ejecutar búsqueda de casos de colisión
+                    analyzer.demonstrate_collision_case()
+                    
+                except ValueError:
+                    print("❌ Valores inválidos")
+                except KeyboardInterrupt:
+                    print("\n⏹️  Búsqueda cancelada por el usuario")
+                    
+            elif option == '13':
+                # Demo completo del sistema ISL-IENAI para hackathon
+                print("🚀 INICIANDO DEMOSTRACIÓN DEL SISTEMA ISL-IENAI")
+                print("=" * 60)
+                print("💡 Sistema de Control de Enlaces Inter-Satelitales")
+                print("🎯 Demostrando toma de decisiones autónomas en el espacio")
+                print()
+                
+                try:
+                    demo = HackathonDemo(analyzer)
+                    demo.run_complete_demo()
+                except Exception as e:
+                    print(f"❌ Error en demostración: {str(e)}")
+                    
+            elif option == '14':
+                # Simulador ISL individual
+                print("🤖 SIMULADOR ISL INDIVIDUAL")
+                print("=" * 50)
+                print("💡 Configura tu propio escenario de análisis ISL")
+                print()
+                
+                try:
+                    sat_local = input("🛰️  Satélite local (default: IENAI_SAT_01): ").strip() or "IENAI_SAT_01"
+                    sat_neighbor = input("📡 Satélite vecino (default: IENAI_SAT_02): ").strip() or "IENAI_SAT_02"
+                    
+                    print("\n🎯 Configurar escenario de riesgo:")
+                    print("   1. Riesgo CRÍTICO (encuentro < 5 km)")
+                    print("   2. Riesgo ALTO (encuentro 5-20 km)")
+                    print("   3. Riesgo MEDIO (encuentro 20-50 km)")
+                    print("   4. Riesgo BAJO (sin amenazas)")
+                    
+                    risk_choice = input("Selecciona nivel de riesgo (1-4): ").strip()
+                    propellant = float(input("⛽ Nivel de combustible (0.0-1.0): ") or "0.5")
+                    
+                    # Configurar datos de riesgo según la selección
+                    risk_configs = {
+                        '1': {'risk_level': 'CRÍTICO', 'close_encounters': [{'distance_km': 2.1, 'datetime': datetime.now()}]},
+                        '2': {'risk_level': 'ALTO', 'close_encounters': [{'distance_km': 12.5, 'datetime': datetime.now()}]},
+                        '3': {'risk_level': 'MEDIO', 'close_encounters': [{'distance_km': 35.0, 'datetime': datetime.now()}]},
+                        '4': {'risk_level': 'BAJO', 'close_encounters': []}
+                    }
+                    
+                    risk_data = risk_configs.get(risk_choice, risk_configs['4'])
+                    
+                    # Ejecutar análisis ISL
+                    isl_system = ISLControlSystem(analyzer)
+                    result = isl_system.determine_thrust_aware_routing(
+                        sat_local, sat_neighbor, risk_data, propellant
+                    )
+                    
+                    # Mostrar resultados detallados
+                    print(f"\n🤖 RESULTADO DEL ANÁLISIS ISL:")
+                    print("=" * 50)
+                    print(f"⏰ Timestamp: {result['timestamp']}")
+                    print(f"🚀 Comando: {result['command']}")
+                    print(f"⚡ Acción: {result['action']}")
+                    print(f"🎯 Urgencia: {result['urgency_level']}")
+                    print(f"📊 Riesgo: {result['risk_assessment']}")
+                    print(f"⛽ Combustible: {result['propellant_status']}")
+                    
+                    if result['time_to_maneuver_hours'] < float('inf'):
+                        print(f"⏰ Tiempo para maniobra: {result['time_to_maneuver_hours']:.3f} horas")
+                    
+                    print(f"📡 Prioridad de red: {result['network_priority']}")
+                    print(f"📶 Ancho de banda: {result['bandwidth_allocation']*100:.0f}%")
+                    print(f"🎯 Satélite objetivo: {result['target_satellite']}")
+                    print(f"🧠 Decisión autónoma: {result['autonomous_decision']}")
+                    print(f"💻 Ubicación: {result['chip_location']}")
+                    
+                    # Mostrar protocolo ISL
+                    protocol = result['isl_protocol']
+                    print(f"\n📡 PROTOCOLO ISL:")
+                    print(f"   • Tipo: {protocol['message_type']}")
+                    print(f"   • Prioridad: {protocol['priority']}")
+                    print(f"   • Encriptación: {protocol['encryption']}")
+                    print(f"   • Acción solicitada: {protocol['payload']['requested_action']}")
+                    
+                    # Simular respuesta de constelación
+                    constellation = isl_system.simulate_constellation_response(result)
+                    print(f"\n🌐 RESPUESTA DE CONSTELACIÓN:")
+                    print(f"   • Decisión colectiva: {constellation['collective_decision']}")
+                    print(f"   • Capacidad total: {constellation['network_adaptation']['total_available_capacity']}")
+                    print(f"   • Satélites respondiendo: {len(constellation['responding_satellites'])}")
+                    print(f"   • Failover listo: {constellation['network_adaptation']['failover_ready']}")
+                    
+                except ValueError:
+                    print("❌ Valores inválidos")
+                except Exception as e:
+                    print(f"❌ Error en simulación: {str(e)}")
+                        
+            elif option == '15':
+                print("👋 ¡Gracias por usar el Sistema de Análisis de Satélites!")
+                break
                         
             elif option == '2':
                 # Ver satélites populares por categoría
@@ -1175,7 +2578,7 @@ def main():
                 sat_name = input("🚀 Nombre del satélite: ").strip()
                 if sat_name:
                     try:
-                        days = int(input("📅 Días hacia el futuro (máx 180): ") or "30")
+                        days = int(input("📅 Días hacia el futuro (máx 4): ") or "4")
                         days = min(days, 180)
                         
                         print(f"⏳ Calculando posiciones futuras para {days} días...")
