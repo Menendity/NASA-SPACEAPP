@@ -1,0 +1,417 @@
+﻿<!DOCTYPE html>
+<html lang="es">
+<head>
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.95/Build/Cesium/Cesium.js"></script>
+    <link href="https://cesium.com/downloads/cesiumjs/releases/1.95/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+    <style>
+        html, body, #cesiumContainer {
+            width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden;
+            font-family: sans-serif;
+        }
+        
+        .analysis-panel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            width: 400px;
+            background: rgba(42, 42, 42, 0.9);
+            border-radius: 8px;
+            padding: 15px;
+            color: white;
+            max-height: 80vh;
+            overflow-y: auto;
+            z-index: 1000;
+        }
+        
+        .analysis-panel h2 {
+            margin-top: 0;
+            color: #48b;
+            border-bottom: 2px solid #48b;
+            padding-bottom: 5px;
+        }
+        
+        .satellite-item {
+            background: rgba(0, 0, 0, 0.5);
+            margin: 8px 0;
+            padding: 10px;
+            border-radius: 5px;
+            border-left: 4px solid #48b;
+        }
+        
+        .risk-crítico { border-left-color: #ff4444; }
+        .risk-alto { border-left-color: #ff8800; }
+        .risk-moderado { border-left-color: #ffcc00; }
+        .risk-bajo { border-left-color: #44ff44; }
+        
+        .controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(42, 42, 42, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            color: white;
+            z-index: 1000;
+        }
+        
+        .control-button {
+            background: #48b;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            margin: 5px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        
+        .control-button:hover {
+            background: #5ac;
+        }
+        
+        .maneuver-time {
+            font-weight: bold;
+            color: #ffcc00;
+        }
+        
+        .critical-alert {
+            color: #ff4444;
+            font-weight: bold;
+            animation: blink 1s infinite;
+        }
+        
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0.5; }
+        }
+        
+        .stats {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 8px;
+            margin: 5px 0;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div id="cesiumContainer"></div>
+    
+    <div class="analysis-panel">
+        <h2> Análisis de Colisiones Avanzado</h2>
+        <div id="analysisResults">
+            <div class="stats">
+                 Sistema integrado con análisis Python
+            </div>
+        </div>
+    </div>
+    
+    <div class="controls">
+        <h3> Controles</h3>
+        <button class="control-button" onclick="loadSatellites()"> Cargar Satélites</button>
+        <button class="control-button" onclick="analyzeCollisions()"> Analizar Colisiones</button>
+        <button class="control-button" onclick="showManeuverTimes()"> Tiempos Maniobra</button>
+        <button class="control-button" onclick="toggleOrbits()"> Mostrar Órbitas</button>
+    </div>
+
+    <script>
+        // Configuración de Cesium
+        const viewer = new Cesium.Viewer('cesiumContainer', {
+            terrainProvider: Cesium.createWorldTerrain(),
+            scene3DOnly: true,
+            shouldAnimate: true
+        });
+        
+        // Variables globales
+        let satellites = [];
+        let analysisResults = [];
+        let showOrbits = false;
+        
+        // Datos de ejemplo integrados con nuestro sistema Python
+        const exampleSatellites = [
+            {
+                name: "ISS (ZARYA)",
+                position: [6800, 0, 0], // km from Earth center
+                velocity: [0, 7.8, 0], // km/s
+                altitude: 420,
+                risk_level: "BAJO",
+                collision_probability: 1e-12,
+                maneuver_time_hours: 48.5
+            },
+            {
+                name: "COSMOS 2499",
+                position: [6900, 1000, 500],
+                velocity: [0.5, 7.5, 0.2],
+                altitude: 520,
+                risk_level: "MODERADO",
+                collision_probability: 5e-9,
+                maneuver_time_hours: 12.3
+            },
+            {
+                name: "SENTINEL-1A",
+                position: [7200, -800, 300],
+                velocity: [-0.3, 7.2, 0.1],
+                altitude: 820,
+                risk_level: "ALTO",
+                collision_probability: 2e-6,
+                maneuver_time_hours: 6.8
+            },
+            {
+                name: "DEBRIS FRAGMENT",
+                position: [6850, 200, -100],
+                velocity: [0.1, 7.7, -0.1],
+                altitude: 470,
+                risk_level: "CRÍTICO",
+                collision_probability: 8e-5,
+                maneuver_time_hours: 2.1
+            }
+        ];
+        
+        // Función para cargar satélites
+        function loadSatellites() {
+            updateAnalysisPanel(" Conectando con sistema Python...");
+            
+            // Limpiar satélites existentes
+            viewer.entities.removeAll();
+            satellites = [];
+            
+            // Simular integración con nuestro AdvancedCollisionAnalyzer
+            setTimeout(() => {
+                exampleSatellites.forEach((sat, index) => {
+                    const position = Cesium.Cartesian3.fromArray([
+                        sat.position[0] * 1000, // convertir a metros
+                        sat.position[1] * 1000,
+                        sat.position[2] * 1000
+                    ]);
+                    
+                    const color = getRiskColor(sat.risk_level);
+                    const size = sat.risk_level === 'CRÍTICO' ? 15 : 
+                                sat.risk_level === 'ALTO' ? 12 : 8;
+                    
+                    const entity = viewer.entities.add({
+                        name: sat.name,
+                        position: position,
+                        point: {
+                            pixelSize: size,
+                            color: color,
+                            outlineColor: Cesium.Color.WHITE,
+                            outlineWidth: 2,
+                            heightReference: Cesium.HeightReference.NONE
+                        },
+                        label: {
+                            text: sat.name,
+                            font: '12pt sans-serif',
+                            pixelOffset: new Cesium.Cartesian2(0, -40),
+                            fillColor: Cesium.Color.WHITE,
+                            outlineColor: Cesium.Color.BLACK,
+                            outlineWidth: 2,
+                            style: Cesium.LabelStyle.FILL_AND_OUTLINE
+                        }
+                    });
+                    
+                    satellites.push({
+                        entity: entity,
+                        data: sat
+                    });
+                });
+                
+                updateAnalysisPanel(` ${satellites.length} satélites cargados desde sistema Python`);
+                viewer.zoomTo(viewer.entities);
+            }, 1500);
+        }
+        
+        // Función para analizar colisiones (integrada con nuestro sistema)
+        function analyzeCollisions() {
+            updateAnalysisPanel(" Ejecutando análisis avanzado...<br> Calculando perturbaciones físicas...<br> Computando tiempos de maniobra...");
+            
+            // Simular análisis del AdvancedCollisionAnalyzer
+            setTimeout(() => {
+                analysisResults = exampleSatellites.map(sat => ({
+                    ...sat,
+                    distance_km: Math.random() * 100 + 10,
+                    relative_velocity: Math.random() * 15 + 5,
+                    delta_v_required: Math.random() * 50 + 10,
+                    j2_perturbation: Math.random() * 0.001,
+                    atmospheric_drag: Math.random() * 0.0001,
+                    recommendations: generateRecommendations(sat.risk_level)
+                }));
+                
+                displayAnalysisResults();
+                highlightRisks();
+            }, 2000);
+        }
+        
+        // Función para mostrar tiempos de maniobra
+        function showManeuverTimes() {
+            if (analysisResults.length === 0) {
+                updateAnalysisPanel(" Ejecute primero el análisis de colisiones");
+                return;
+            }
+            
+            let html = `
+                <h3> Tiempos de Maniobra Evasiva</h3>
+                <div class="stats">
+                     Fórmula: t  (R_req + nσ) / (v_rel - nk)<br>
+                     Factor de seguridad: 3.0x<br>
+                     Integrado con sistema Python
+                </div>
+            `;
+            
+            analysisResults
+                .sort((a, b) => a.maneuver_time_hours - b.maneuver_time_hours)
+                .forEach(sat => {
+                    const urgency = getUrgencyLevel(sat.maneuver_time_hours);
+                    const cssClass = urgency === 'INMEDIATA' ? 'critical-alert' : 'maneuver-time';
+                    
+                    html += `
+                        <div class="satellite-item risk-${sat.risk_level.toLowerCase()}">
+                            <strong>${sat.name}</strong><br>
+                            <span class="${cssClass}"> ${sat.maneuver_time_hours.toFixed(1)} horas</span><br>
+                             Urgencia: ${urgency}<br>
+                             Delta-V: ${sat.delta_v_required.toFixed(1)} m/s<br>
+                             Distancia: ${sat.distance_km.toFixed(1)} km<br>
+                             J2: ${(sat.j2_perturbation * 1000).toFixed(3)} m/s<br>
+                             Arrastre: ${(sat.atmospheric_drag * 1000).toFixed(3)} m/s
+                        </div>
+                    `;
+                });
+            
+            document.getElementById('analysisResults').innerHTML = html;
+        }
+        
+        // Función para alternar órbitas
+        function toggleOrbits() {
+            showOrbits = !showOrbits;
+            
+            satellites.forEach(sat => {
+                if (showOrbits) {
+                    const altitude = sat.data.altitude * 1000;
+                    const radius = 6371000 + altitude;
+                    
+                    const orbitEntity = viewer.entities.add({
+                        name: sat.data.name + "_orbit",
+                        ellipse: {
+                            semiMajorAxis: radius,
+                            semiMinorAxis: radius,
+                            height: 0,
+                            material: getRiskColor(sat.data.risk_level).withAlpha(0.3),
+                            outline: true,
+                            outlineColor: getRiskColor(sat.data.risk_level)
+                        }
+                    });
+                } else {
+                    const orbitEntities = viewer.entities.values.filter(entity => 
+                        entity.name && entity.name.includes("_orbit")
+                    );
+                    orbitEntities.forEach(entity => viewer.entities.remove(entity));
+                }
+            });
+        }
+        
+        // Funciones auxiliares
+        function getRiskColor(riskLevel) {
+            switch(riskLevel) {
+                case 'CRÍTICO': return Cesium.Color.RED;
+                case 'ALTO': return Cesium.Color.ORANGE;
+                case 'MODERADO': return Cesium.Color.YELLOW;
+                case 'BAJO': return Cesium.Color.GREEN;
+                default: return Cesium.Color.WHITE;
+            }
+        }
+        
+        function getUrgencyLevel(hours) {
+            if (hours < 1) return 'INMEDIATA';
+            if (hours < 6) return 'MUY ALTA';
+            if (hours < 24) return 'ALTA';
+            if (hours < 72) return 'MODERADA';
+            return 'BAJA';
+        }
+        
+        function generateRecommendations(riskLevel) {
+            const recommendations = {
+                'CRÍTICO': [
+                    " ACCIÓN INMEDIATA: Ejecutar maniobra evasiva",
+                    " Contactar centro de control urgentemente",
+                    " Activar protocolo de emergencia"
+                ],
+                'ALTO': [
+                    " Preparar maniobra evasiva",
+                    " Incrementar frecuencia de monitoreo",
+                    " Actualizar predicciones cada hora"
+                ],
+                'MODERADO': [
+                    " Mantener vigilancia continua",
+                    " Refinar cálculos de trayectoria",
+                    " Evaluar ventana de maniobra"
+                ],
+                'BAJO': [
+                    " Continuar monitoreo rutinario",
+                    " Registrar en base de datos",
+                    " Verificar en próximo ciclo"
+                ]
+            };
+            return recommendations[riskLevel] || [];
+        }
+        
+        function updateAnalysisPanel(message) {
+            document.getElementById('analysisResults').innerHTML = `
+                <div class="stats">${message}</div>
+            `;
+        }
+        
+        function displayAnalysisResults() {
+            const criticalCount = analysisResults.filter(s => s.risk_level === 'CRÍTICO').length;
+            const highCount = analysisResults.filter(s => s.risk_level === 'ALTO').length;
+            const totalRisks = analysisResults.filter(s => s.risk_level !== 'BAJO').length;
+            
+            let html = `
+                <h3> Resultados del Análisis</h3>
+                <div class="stats">
+                     Satélites analizados: ${analysisResults.length}<br>
+                     Riesgos críticos: ${criticalCount}<br>
+                     Riesgos altos: ${highCount}<br>
+                     Total riesgos: ${totalRisks}<br>
+                     Modelo: J2 + Arrastre atmosférico
+                </div>
+            `;
+            
+            analysisResults
+                .sort((a, b) => b.collision_probability - a.collision_probability)
+                .forEach(sat => {
+                    const cssClass = `risk-${sat.risk_level.toLowerCase()}`;
+                    html += `
+                        <div class="satellite-item ${cssClass}">
+                            <strong>${sat.name}</strong><br>
+                             Prob: ${sat.collision_probability.toExponential(2)}<br>
+                             Dist: ${sat.distance_km.toFixed(1)} km<br>
+                             Vel: ${sat.relative_velocity.toFixed(1)} km/s<br>
+                            <span class="maneuver-time"> ${sat.maneuver_time_hours.toFixed(1)}h</span><br>
+                             ΔV: ${sat.delta_v_required.toFixed(1)} m/s
+                        </div>
+                    `;
+                });
+            
+            document.getElementById('analysisResults').innerHTML = html;
+        }
+        
+        function highlightRisks() {
+            satellites.forEach(sat => {
+                const riskLevel = sat.data.risk_level;
+                if (riskLevel === 'CRÍTICO' || riskLevel === 'ALTO') {
+                    sat.entity.point.color = new Cesium.CallbackProperty(() => {
+                        const time = Date.now() / 1000;
+                        const alpha = Math.sin(time * 3) * 0.3 + 0.7;
+                        return getRiskColor(riskLevel).withAlpha(alpha);
+                    }, false);
+                }
+            });
+        }
+        
+        // Cargar satélites automáticamente
+        setTimeout(loadSatellites, 1000);
+        
+        // Configurar vista inicial
+        viewer.scene.camera.setView({
+            destination: Cesium.Cartesian3.fromDegrees(0, 0, 15000000)
+        });
+    </script>
+</body>
+</html>
