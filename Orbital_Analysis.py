@@ -898,8 +898,10 @@ class SatelliteAnalyzer:
                 if t_conservative:
                     scenarios.append({
                         'name': 'Conservative (2σ)',
+                        'nombre': 'Conservador (2σ)',
                         'time_seconds': t_conservative,
-                        'time_hours': t_conservative / 3600
+                        'time_hours': t_conservative / 3600,
+                        'tiempo_horas': t_conservative / 3600
                     })
             
             # Aggressive scenario (n=1)
@@ -908,8 +910,10 @@ class SatelliteAnalyzer:
                 if t_aggressive:
                     scenarios.append({
                         'name': 'Aggressive (1σ)',
+                        'nombre': 'Agresivo (1σ)',
                         'time_seconds': t_aggressive,
-                        'time_hours': t_aggressive / 3600
+                        'time_hours': t_aggressive / 3600,
+                        'tiempo_horas': t_aggressive / 3600
                     })
             
             # Sensitivity analysis
@@ -942,11 +946,29 @@ class SatelliteAnalyzer:
                     'seconds': t_maneuver_seconds,
                     'minutes': t_minutes,
                     'hours': t_hours,
-                    'days': t_days
+                    'days': t_days,
+                    'segundos': t_maneuver_seconds,
+                    'minutos': t_minutes,
+                    'horas': t_hours,
+                    'dias': t_days
+                },
+                'tiempo_maniobra': {
+                    'seconds': t_maneuver_seconds,
+                    'minutes': t_minutes,
+                    'hours': t_hours,
+                    'days': t_days,
+                    'segundos': t_maneuver_seconds,
+                    'minutos': t_minutes,
+                    'horas': t_hours,
+                    'dias': t_days
                 },
                 'evaluation': {
                     'criticality': criticality,
                     'recommendation': recommendation
+                },
+                'evaluacion': {
+                    'criticidad': criticality,
+                    'recomendacion': recommendation
                 },
                 'calculation_components': {
                     'numerator': numerator,
@@ -954,10 +976,15 @@ class SatelliteAnalyzer:
                     'safety_margin': denominator - n * k
                 },
                 'alternative_scenarios': scenarios,
+                'escenarios_alternativos': scenarios,
                 'sensitivity_analysis': sensitivity,
                 'interpretation': {
                     'leo_context': self._get_leo_context(v_rel),
                     'operational_recommendations': self._get_operational_recommendations(t_hours, v_rel)
+                },
+                'interpretacion': {
+                    'contexto_leo': self._get_leo_context(v_rel),
+                    'recomendaciones_operacionales': self._get_operational_recommendations(t_hours, v_rel)
                 }
             }
             
@@ -981,7 +1008,9 @@ class SatelliteAnalyzer:
             
         return {
             'encounter_type': encounter_type,
+            'tipo_encuentro': encounter_type,
             'description': description,
+            'descripcion': description,
             'relative_velocity_ms': v_rel,
             'relative_velocity_kmh': v_rel * 3.6
         }
@@ -2500,26 +2529,50 @@ def main():
                         print(f"\n⏰ MANEUVER ANALYSIS RESULT")
                         print("=" * 50)
                         print(f"⚡ Required maneuver time:")
-                        print(f"   • {result['tiempo_maniobra']['segundos']:.1f} seconds")
-                        print(f"   • {result['tiempo_maniobra']['minutos']:.1f} minutes")
-                        print(f"   • {result['tiempo_maniobra']['horas']:.2f} hours")
-                        print(f"   • {result['tiempo_maniobra']['dias']:.3f} days")
                         
-                        print(f"\n{result['evaluacion']['criticidad']}")
-                        print(f"💡 {result['evaluacion']['recomendacion']}")
+                        # Use maneuver_time (with fallback to tiempo_maniobra)
+                        tiempo_data = result.get('maneuver_time') or result.get('tiempo_maniobra', {})
+                        if tiempo_data:
+                            print(f"   • {tiempo_data.get('segundos', tiempo_data.get('seconds', 0)):.1f} seconds")
+                            print(f"   • {tiempo_data.get('minutos', tiempo_data.get('minutes', 0)):.1f} minutes")
+                            print(f"   • {tiempo_data.get('horas', tiempo_data.get('hours', 0)):.2f} hours")
+                            print(f"   • {tiempo_data.get('dias', tiempo_data.get('days', 0)):.3f} days")
                         
-                        print(f"\n🎯 Encounter context:")
-                        print(f"   • {result['interpretacion']['contexto_leo']['tipo_encuentro']}")
-                        print(f"   • {result['interpretacion']['contexto_leo']['descripcion']}")
+                        # Use evaluation (with fallback to evaluacion)
+                        eval_data = result.get('evaluation') or result.get('evaluacion', {})
+                        if eval_data:
+                            criticality = eval_data.get('criticality') or eval_data.get('criticidad', 'UNKNOWN')
+                            recommendation = eval_data.get('recommendation') or eval_data.get('recomendacion', 'No recommendation')
+                            print(f"\n{criticality}")
+                            print(f"💡 {recommendation}")
                         
-                        print(f"\n📋 Operational recommendations:")
-                        for rec in result['interpretacion']['recomendaciones_operacionales']:
-                            print(f"   {rec}")
+                        # Use interpretation (with fallback to interpretacion)
+                        interp_data = result.get('interpretation') or result.get('interpretacion', {})
+                        if interp_data:
+                            leo_context = interp_data.get('leo_context') or interp_data.get('contexto_leo', {})
+                            if leo_context:
+                                encounter_type = leo_context.get('encounter_type') or leo_context.get('tipo_encuentro', 'Unknown')
+                                description = leo_context.get('description') or leo_context.get('descripcion', 'No description')
+                                print(f"\n🎯 Encounter context:")
+                                print(f"   • {encounter_type}")
+                                print(f"   • {description}")
                             
-                        if result['escenarios_alternativos']:
+                            # Operational recommendations
+                            op_recs = interp_data.get('operational_recommendations') or interp_data.get('recomendaciones_operacionales', [])
+                            if op_recs:
+                                print(f"\n📋 Operational recommendations:")
+                                for rec in op_recs:
+                                    print(f"   {rec}")
+                        
+                        # Use alternative_scenarios (with fallback to escenarios_alternativos)
+                        scenarios = result.get('alternative_scenarios') or result.get('escenarios_alternativos', [])
+                        if scenarios:
                             print(f"\n📊 Alternative scenarios:")
-                            for escenario in result['escenarios_alternativos']:
-                                print(f"   • {escenario['nombre']}: {escenario['tiempo_horas']:.2f} hours")
+                            for scenario in scenarios:
+                                if isinstance(scenario, dict):
+                                    name = scenario.get('name') or scenario.get('nombre', 'Unknown scenario')
+                                    hours = scenario.get('time_hours') or scenario.get('tiempo_horas', 0)
+                                    print(f"   • {name}: {hours:.2f} hours")
                     else:
                         print(f"❌ {result['error']}")
                         if 'recommendation' in result:
